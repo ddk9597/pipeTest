@@ -1,0 +1,98 @@
+name: ai-review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ai-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get PR diff
+        id: diff
+        run: |
+          git fetch origin ${{ github.base_ref }} --depth=1
+          git diff --unified=3 origin/${{ github.base_ref }}...HEAD > pr.diff
+          echo "DIFF_PATH=pr.diff" >> $GITHUB_OUTPUT
+
+      - name: Call OpenAI (generate review)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          # diff가 너무 크면 비용/토큰 터질 수 있으니 상한을 둠(필요시 조절)
+          head -c 120000 pr.diff > pr.diff.trimmed
+
+          PROMPT=$(cat <<'EOF'
+          당신은 시니어 코드리뷰어입니다.
+          아래 PR diff를 보고:
+          1) 위험한 변경(보안/데이터/장애 가능성)
+          2) 버그 가능성 높은 부분
+          3) 성능/가독성/테스트 관점 개선점
+          4) "바로 적용 가능한" 구체적 수정 제안(코드 블록 포함 가능)
+          을 한국어로 간결하게 정리하세요.
+          EOF
+          )
+
+          # OpenAI Responses API 호출 (model은 조직 정책에 맞게 변경)
+          curl -sS https://api.openai.com/v1/responses \
+            -H "Authorization: Bearer ${OPENAI_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d @- <<JSON > response.json
+          {
+            "model": "gpt-4.1-mini",
+            "input": [
+              {"role":"system","content":"You are a helpful assistant."},
+              {"role":"user","content":[
+                {"type":"text","text": ${PROMPT@Q} },
+                {"type":"text","text":"--- PR DIFF ---"},
+                {"type":"text","text": "$(cat pr.diff.trimmed | sed 's/\\/\\\\/g; s/"/\\"/g')" }
+              ]}
+            ]
+          }
+JSON
+
+          # 응답 텍스트 뽑아서 파일로 저장
+          python - <<'PY'
+          import json
+          data=json.load(open("response.json", encoding="utf-8"))
+          # responses api는 output_text를 제공 (없으면 output[*].content에서 추출)
+          text = data.get("output_text") or ""
+          if not text:
+            out = []
+            for item in data.get("output", []):
+              for c in item.get("content", []):
+                if c.get("type") == "output_text":
+                  out.append(c.get("text",""))
+            text = "\n".join(out).strip()
+          open("ai_review.md","w",encoding="utf-8").write(text or "(빈 응답)")
+          PY
+
+      - name: Comment on PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BODY=$(cat ai_review.md)
+          # 너무 길면 PR 코멘트 제한 걸릴 수 있어 컷
+          echo "${BODY}" | head -c 60000 > ai_review.short.md
+          gh pr comment ${{ github.event.pull_request.number }} --body-file ai_review.short.md
+
+      - name: Upload artifact (optional)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-review
+          path: |
+            pr.diff
+            ai_review.md
