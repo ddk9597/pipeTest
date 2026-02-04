@@ -1,0 +1,92 @@
+name: ai-staff
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ai-staff-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  planner:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Make plan (AI)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          # PR 제목/본문을 요구사항으로 사용
+          cat <<EOF > input.md
+          # PR Title
+          ${{ github.event.pull_request.title }}
+
+          # PR Body
+          ${{ github.event.pull_request.body }}
+          EOF
+
+          # 결과를 plan.md로 만든다고 가정 (curl 호출/파싱은 너 기존 예시 그대로 재사용)
+          echo "TODO: call LLM and write plan.md" > plan.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: planner-out
+          path: plan.md
+
+  coder:
+    needs: planner
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: planner-out
+
+      - name: Implement (AI)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          # plan.md를 입력으로 받아 코드 수정안(패치)을 만든다고 가정
+          echo "TODO: call LLM and write patch.diff" > patch.diff
+
+          # 실제 적용(선택): patch를 적용하는 단계
+          # git apply patch.diff
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coder-out
+          path: patch.diff
+
+  reviewer:
+    needs: coder
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: planner-out
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: coder-out
+
+      - name: Final review (AI)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          # plan.md + patch.diff를 입력으로 최종 리뷰 생성
+          echo "TODO: call LLM and write final_review.md" > final_review.md
+
+      - name: Comment PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} --body-file final_review.md
