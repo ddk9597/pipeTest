@@ -1,92 +1,49 @@
-name: ai-staff
+name: AI Staff (Claude->Codex->Claude loop)
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
-
-permissions:
-  contents: read
-  pull-requests: write
-
-concurrency:
-  group: ai-staff-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+    types: [opened, edited, synchronize]
 
 jobs:
-  planner:
+  ai_staff:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      MAX_ITERS: "5"
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Make plan (AI)
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      - name: Prepare inputs (PR title/body)
         run: |
-          # PR 제목/본문을 요구사항으로 사용
-          cat <<EOF > input.md
+          DELIM="__PR_INPUT_EOF__"
+          cat <<$DELIM > input.md
           # PR Title
           ${{ github.event.pull_request.title }}
 
           # PR Body
           ${{ github.event.pull_request.body }}
-          EOF
+          $DELIM
 
-          # 결과를 plan.md로 만든다고 가정 (curl 호출/파싱은 너 기존 예시 그대로 재사용)
-          echo "TODO: call LLM and write plan.md" > plan.md
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: planner-out
-          path: plan.md
-
-  coder:
-    needs: planner
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: planner-out
-
-      - name: Implement (AI)
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      - name: Install python deps
         run: |
-          # plan.md를 입력으로 받아 코드 수정안(패치)을 만든다고 가정
-          echo "TODO: call LLM and write patch.diff" > patch.diff
+          python -m pip install --upgrade pip
+          pip install requests
 
-          # 실제 적용(선택): patch를 적용하는 단계
-          # git apply patch.diff
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: coder-out
-          path: patch.diff
-
-  reviewer:
-    needs: coder
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: planner-out
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: coder-out
-
-      - name: Final review (AI)
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      - name: Run loop (Claude plan -> Codex patch -> Claude verify)
         run: |
-          # plan.md + patch.diff를 입력으로 최종 리뷰 생성
-          echo "TODO: call LLM and write final_review.md" > final_review.md
+          python .github/scripts/ai_staff_loop.py
 
-      - name: Comment PR
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh pr comment ${{ github.event.pull_request.number }} --body-file final_review.md
+      - name: Upload report artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-staff-report
+          path: |
+            report.md
+            plan.md
+            patch.diff
+            verify.json
